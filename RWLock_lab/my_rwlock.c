@@ -361,6 +361,8 @@ static void *thread_work(void *arg_ptr) {
 	return NULL;
 }
 
+
+
 typedef struct {
 	double elapsed_seconds;
 	uint64_t member_ops, insert_ops, delete_ops;
@@ -368,3 +370,116 @@ typedef struct {
 	uint64_t initial_inserted, final_size;
 	int list_valid;
 } bench_result_t;
+
+static double monotonic_seconds(void) {
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		perror("clock_gettime");
+		exit(EXIT_FAILURE);
+	}
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1.0e9; // количество секунд с дробью
+}
+
+static int run_benchmark(lock_kind_t kind, int thread_count, uint64_t total_ops, 
+		uint64_t initial_keys, double search_fraction,
+		double insert_fraction, bench_result_t *out) {
+	
+	pthread_t *threads = NULL;
+	thread_arg_t *args = NULL;
+	uint64_t i, base_ops, extra_ops, initial_inserted = 0;
+	size_t created = 0;
+	double start, finish;
+	int rc = 0;
+
+	memset(out, 0, sizeof(*out));
+	head = NULL;
+	if (populate_initial_list(initial_keys, &initial_inserted) != 0) {
+		fprintf(stderr, "Ошибка выделения памяти в начале\n");
+		list_free();
+		return -1;
+	}
+	out->initial_inserted = initial_inserted;
+
+	threads = malloc((size_t)thread_count * sizeof *threads);
+	args = malloc((size_t)thread_count * sizeof *args);
+	if (threads == NULL || args == NULL) {
+		fprintf(stderr, "Память под потоки не выделена :(\n");
+		free(threads);
+		free(args);
+		list_free();
+		return -1;
+	}
+
+	rc = lock_init(kind);
+	if (rc != 0) {
+		fprintf(stderr, "Не удалось инициализировать блокировку :( %s\n", strerror(rc));
+        	free(threads);
+        	free(args);
+                list_free();
+        	return -1;
+	}
+
+	base_ops = total_ops / (uint64_t)thread_count;
+	extra_ops = total_ops % (uint64_t)thread_count;
+	for (i = 0; i < (uint64_t)thread_count; i++) {
+		args[i].rank = (long)i;
+		args[i].ops = base_ops + (i < extra_ops ? 1U : 0U); // все лишние раскидаем равномерно по потокам
+		args[i].search_fraction = search_fraction;
+		args[i].insert_fraction = insert_fraction;
+	}
+
+
+	// ИЗМЕРЕНИЕ
+	start = monotonic_seconds();
+	for (i = 0; i < (uint64_t)thread_count; i++) {
+		rc = pthread_create(&threads[i], NULL, thread_work, &args[i]);
+		if (rc != 0) {
+			fprintf(stderr, "Поток %ld не создан: %s\n", (long)i, strerror(rc));
+			break;
+		}
+		++created;
+	}
+	for (i = 0; i < (uint64_t)thread_count; i++) {
+		rc = pthread_join(threads[i], NULL);
+		if (rc != 0) {
+			fprintf(stderr, "Join не удался: %s\n", strerror(rc));
+			rc = -1;
+		}
+	}
+	finish = monotonic_seconds();
+	// КОНЕЦ ИЗМЕРЕНИЯ
+	//
+	
+	out->elapsed_seconds = finish - start;
+
+	for (i = 0; i < (uint64_t)created; i++) {
+		out->member_ops += args[i].result.member_ops;
+        	out->insert_ops += args[i].result.insert_ops;
+        	out->delete_ops += args[i].result.delete_ops;
+        	out->member_hits += args[i].result.member_hits;
+        	out->inserted += args[i].result.inserted;
+        	out->deleted += args[i].result.deleted;
+        	out->errors += args[i].result.allocation_errors;
+	}
+
+
+	out->final_size = list_size_and_validate(&out->list_valid);
+
+
+	{
+		int drc = lock_destroy(kind);
+		if (drc != 0) {
+			fprintf(stderr, "Не уничтожили блокировку: %s\n", strerror(drc));
+			rc = -1;
+		}
+	}
+
+
+	free(threads);
+	free(args);
+	list_free();
+
+	if (created != (size_t)thread_count || rc != 0) return -1;
+    	return 0;
+
+}
