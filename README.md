@@ -107,8 +107,8 @@ gcc -O2 -std=c11 -Wall -Wextra -Wpedantic -pthread rwlock_bench.c -o rwlock_benc
 ## Результаты сравнения
 
 
-![Сравнение при высокой доле удаления](screenshots/delete_heavy.png)
+![Сравнение при высокой доле удаления](RWLock_lab/screenshots/delete_heavy.png)
 
-![Сравнение при высокой доле чтения](screenshots/read_heavy.png)
+![Сравнение при высокой доле чтения](RWLock_lab/screenshots/read_heavy.png)
 
-![Сравнение при высокой доле вставки](screenshots/insert_heavy.png)
+![Сравнение при высокой доле вставки](RWLock_lab/screenshots/insert_heavy.png)
