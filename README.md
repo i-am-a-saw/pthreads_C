@@ -1,110 +1,114 @@
-# pthreads_C
+# `my_rwlock` — блокировка чтения-записи на C
 
-A collection of small C examples for learning POSIX threads (`pthreads`) and thread synchronization on Linux, including WSL.
+Учебная реализация RW-lock на POSIX threads (`pthreads`) и её проверка на односвязном списке. Программа сравнивает собственную блокировку `my_rwlock_t` с библиотечной `pthread_rwlock_t` при одинаковых параметрах нагрузки.
 
-The programs are independent examples. Compile and run them separately; the repository dump does not include a build system such as a `Makefile`.
+## Как устроен `my_rwlock_t`
 
-## Requirements
+Собственная блокировка реализована в `rwlock_bench.c` с помощью одного мьютекса и двух условных переменных:
 
-- Linux or WSL with a C compiler such as GCC
-- POSIX threads and POSIX semaphores (available in a typical Linux environment)
+```c
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t readers_cv;
+    pthread_cond_t writers_cv;
+    unsigned active_readers;
+    unsigned waiting_readers;
+    unsigned waiting_writers;
+    int writer_active;
+} my_rwlock_t;
+```
 
-Check that GCC is installed:
+| Поле | Назначение |
+|---|---|
+| `mutex` | Защищает внутреннее состояние блокировки: счётчики и флаг писателя. |
+| `readers_cv` | Условная переменная, на которой ждут читатели. |
+| `writers_cv` | Условная переменная, на которой ждут писатели. |
+| `active_readers` | Число читателей, уже получивших блокировку. |
+| `waiting_readers` | Число читателей, ожидающих допуска. |
+| `waiting_writers` | Число ожидающих писателей. |
+| `writer_active` | `1`, если блокировка записи занята, иначе `0`. |
+
+Внутренний `mutex` защищает только состояние RW-lock, а не всю операцию со списком. После получения блокировки он освобождается, но `active_readers` или `writer_active` продолжают обозначать, кому разрешён доступ к списку.
+
+## Алгоритм блокировки
+
+### `my_rwlock_rdlock()` — получить блокировку чтения
+
+1. Захватить внутренний `mutex` и увеличить `waiting_readers`.
+2. Пока писатель активен **или** есть ожидающие писатели, ждать на `readers_cv`.
+3. Когда чтение разрешено, уменьшить `waiting_readers` и увеличить `active_readers`.
+4. Освободить внутренний `mutex`. Чтение списка разрешено до вызова `my_rwlock_unlock()`.
+
+Несколько читателей могут работать одновременно. Новые читатели не входят, если уже ожидает писатель.
+
+### `my_rwlock_wrlock()` — получить блокировку записи
+
+1. Захватить внутренний `mutex` и увеличить `waiting_writers`.
+2. Пока активен другой писатель или есть активные читатели, ждать на `writers_cv`.
+3. Когда доступ свободен, уменьшить `waiting_writers` и установить `writer_active = 1`.
+4. Освободить внутренний `mutex`. Писатель получает исключительный доступ до `my_rwlock_unlock()`.
+
+### `my_rwlock_unlock()` — освободить блокировку
+
+1. Захватить внутренний `mutex`.
+2. Сбросить `writer_active`, если завершил работу писатель; иначе уменьшить `active_readers`.
+3. Если список свободен и ожидают писатели, разбудить одного писателя через `pthread_cond_signal()`. Если ожидающих писателей нет, разбудить читателей через `pthread_cond_broadcast()`.
+4. Освободить внутренний `mutex`.
+
+Ожидание в `rdlock` и `wrlock` выполняется в цикле `while`: пробуждение условной переменной не гарантирует, что условие для входа уже выполнено. После пробуждения поток повторно проверяет состояние под мьютексом.
+
+**Политика:** приоритет ожидающих писателей. Это помогает избежать их голодания при непрерывном потоке читателей, но строгий порядок FIFO не гарантируется; при постоянной очереди писателей читатели могут долго ждать.
+
+> Реализация предназначена для лабораторной работы. Она предполагает, что блокировка предварительно инициализирована, каждый успешный захват сопровождается ровно одним `unlock`, а уничтожение выполняется только после завершения всех использующих её потоков. Она не отслеживает владельца блокировки отдельно для каждого потока и не является полной заменой библиотечной реализации для всех сценариев.
+
+## Проверка на односвязном списке
+
+Потоки выполняют случайные операции над общим отсортированным списком:
+
+- `list_member()` — поиск под блокировкой чтения;
+- `list_insert()` — вставка под блокировкой записи;
+- `list_delete()` — удаление под блокировкой записи.
+
+После теста программа проверяет, что выполнено заданное количество операций, а список остаётся отсортированным и не содержит повторяющихся ключей.
+
+Для сравнения используется один и тот же рабочий код, параметры нагрузки и начальные состояния генераторов. Порядок запуска библиотечной и собственной реализаций чередуется между повторами. Измерение включает создание и завершение потоков, но не включает формирование начального списка и инициализацию блокировки.
+
+## Сборка и запуск
+
+Требуются GCC или совместимый C-компилятор и поддержка POSIX threads. Собрать программу можно командой:
 
 ```bash
-gcc --version
+gcc -O2 -std=c11 -Wall -Wextra -Wpedantic -pthread rwlock_bench.c -o rwlock_bench
 ```
 
-Compile the runnable examples with `-pthread`:
+Формат запуска:
 
 ```bash
-gcc -std=c11 -Wall -Wextra -Wpedantic -pthread SOURCE.c -o PROGRAM
+./rwlock_bench <потоки> <всего_операций> <начальные_ключи> <доля_поиска> <доля_вставки> [повторы]
 ```
 
-## Examples
-
-### `Threads_task_workers.c`
-
-Creates three worker threads. Each thread receives a pointer to its own `Task` structure and prints its `rank` and `title`. The main thread joins the workers before exiting.
-
-Build and run:
+Пример:
 
 ```bash
-gcc -std=c11 -Wall -Wextra -Wpedantic -pthread Threads_task_workers.c -o Threads_task_workers
-./Threads_task_workers
+./rwlock_bench 4 1000000 10000 0.80 0.10 3
 ```
 
-The order of the three worker messages is not guaranteed because the threads execute concurrently.
+| Аргумент | Значение в примере |
+|---|---:|
+| Потоки | `4` |
+| Всего операций | `1000000` |
+| Начальные ключи | `10000` |
+| Доля поиска | `0.80` (80%) |
+| Доля вставки | `0.10` (10%) |
+| Повторы | `3` |
 
-**Note:** the calls that set the cancellation state and cancellation type are made by the main thread. The program does not call `pthread_cancel()`, so it does not actually cancel a thread.
+Доля удаления вычисляется автоматически: `1 - доля_поиска - доля_вставки`. Доли задаются числами от `0` до `1`; сумма долей поиска и вставки не должна превышать `1`.
 
-### `Thread_return_result_from_thread.c`
+## Результаты сравнения
 
-Creates three threads. Each worker allocates a `Result` structure on the heap, fills it with the task rank, the string `"return"`, and `rank * 10`, then returns the structure pointer. The main thread obtains each result through `pthread_join()`, prints it, and frees the allocated memory.
 
-Build and run:
+![Сравнение при высокой доле удаления](screenshots/delete_heavy.png)
 
-```bash
-gcc -std=c11 -Wall -Wextra -Wpedantic -pthread Thread_return_result_from_thread.c -o Thread_return_result_from_thread
-./Thread_return_result_from_thread
-```
+![Сравнение при высокой доле чтения](screenshots/read_heavy.png)
 
-Worker output may appear in different orders. The result lines are printed as the main thread joins the thread handles.
-
-### `Semaphore_cycle_messages.c`
-
-Accepts a thread count from `1` to `10000`. Each thread sends a message to the next thread in a circular sequence, using a semaphore to signal that the message is ready. It then waits on its own semaphore and prints the message received from the previous thread. With one thread, the message is sent back to that same thread.
-
-Build and run with four threads:
-
-```bash
-gcc -std=c11 -Wall -Wextra -Wpedantic -pthread Semaphore_cycle_messages.c -o Semaphore_cycle_messages
-./Semaphore_cycle_messages 4
-```
-
-Usage:
-
-```text
-./Semaphore_cycle_messages THREAD_COUNT
-```
-
-The output order is not guaranteed. `THREAD_COUNT` must be in the inclusive range `[1, 10000]`.
-
-### `Mutex_lock_from_main.c`
-
-Initializes a mutex with the type `PTHREAD_MUTEX_ERRORCHECK`. The main thread locks the mutex, then starts a worker that attempts to unlock it. Since the worker is not the thread that owns the mutex, the unlock attempt should fail with an ownership error. After joining the worker, the main thread unlocks the mutex itself.
-
-Build and run:
-
-```bash
-gcc -std=c11 -Wall -Wextra -Wpedantic -pthread Mutex_lock_from_main.c -o Mutex_lock_from_main
-./Mutex_lock_from_main
-```
-
-This example demonstrates that a thread cannot unlock an error-checking mutex owned by another thread. The diagnostic text can vary by system and locale.
-
-### `RWLock_lab/my_rwlock.c`
-
-This file begins a custom read-write lock implementation. The shown code defines a lock structure containing an internal mutex, condition variables for readers and writers, reader/writer counters, and a `writer_active` flag. It implements initialization, destruction, and reader-lock acquisition. New readers wait while a writer is active **or waiting**, which prevents readers from continuously bypassing waiting writers.
-
-**Current limitation:** in the supplied source, this file ends after `my_rwlock_rdlock()`. It does not include reader unlock, writer lock/unlock functions, or a `main()` test program. Therefore, the code shown is an incomplete implementation rather than a runnable read-write-lock example.
-
-## Repository layout
-
-```text
-.
-├── Mutex_lock_from_main.c
-├── RWLock_lab/
-│   └── my_rwlock.c
-├── Semaphore_cycle_messages.c
-├── Thread_return_result_from_thread.c
-└── Threads_task_workers.c
-```
-
-## Notes
-
-- Each top-level `.c` file is a separate program and should be compiled into its own executable.
-- The examples are intended for experimenting with thread creation, joining, return values, mutex ownership, and semaphore-based coordination.
-- In `Thread_return_result_from_thread.c`, the join loop iterates over all three slots even if thread creation fails partway through. Error handling could be improved to join only threads that were successfully created.
-- The `RWLock_lab` source needs the missing lock/unlock operations and a test program before its behavior can be exercised as a complete read-write lock.
-
+![Сравнение при высокой доле вставки](screenshots/insert_heavy.png)
