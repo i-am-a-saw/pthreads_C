@@ -483,3 +483,139 @@ static int run_benchmark(lock_kind_t kind, int thread_count, uint64_t total_ops,
     	return 0;
 
 }
+
+static void print_result(const char *label, const bench_result_t *r,
+		uint64_t requested_ops) {
+	printf("%s: %.6f с, %.0f операций/с\n", label, r->elapsed_seconds,
+           r->elapsed_seconds > 0.0 ? (double)requested_ops / r->elapsed_seconds : 0.0);
+    	printf("  фактически операций: member=%" PRIu64 ", insert=%" PRIu64
+           ", delete=%" PRIu64 " (всего=%" PRIu64 ")\n",
+           r->member_ops, r->insert_ops, r->delete_ops,
+           r->member_ops + r->insert_ops + r->delete_ops);
+    	printf("  найдено=%" PRIu64 ", успешно вставлено=%" PRIu64
+           ", удалено=%" PRIu64 ", ошибок=%" PRIu64 "\n",
+           r->member_hits, r->inserted, r->deleted, r->errors);
+    	printf("  начальный список: %" PRIu64 " узлов, итоговый: %" PRIu64
+           " узлов, порядок/уникальность: %s\n",
+           r->initial_inserted, r->final_size, r->list_valid ? "OK" : "ОШИБКА");
+}
+
+static int parse_u64(const char *text, uint64_t *value)
+{
+    char *end = NULL;
+    unsigned long long v;
+    if (text == NULL || *text == '\0' || *text == '-') return -1;
+    errno = 0;
+    v = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') return -1;
+    *value = (uint64_t)v;
+    return 0;
+}
+
+static int parse_double_arg(const char *text, double *value)
+{
+    char *end = NULL;
+    double v;
+    errno = 0;
+    v = strtod(text, &end);
+    if (errno != 0 || end == text || *end != '\0') return -1;
+    *value = v;
+    return 0;
+}
+
+static void usage(const char *program)
+{
+    fprintf(stderr,
+        "Использование: %s <потоки> <всего_операций> <начальные_ключи> "
+        "<доля_поиска> <доля_вставки> [повторы]\n"
+        "Пример: %s 4 1000000 10000 0.80 0.10 3\n"
+        "Доля удаления вычисляется как 1 - доля_поиска - доля_вставки.\n",
+        program, program);
+}
+
+int main(int argc, char **argv)
+{
+    uint64_t total_ops, initial_keys, repetitions = 1, rep;
+    uint64_t threads_u64;
+    double search_fraction, insert_fraction, delete_fraction;
+    double system_total = 0.0, custom_total = 0.0;
+    int thread_count;
+    bench_result_t system_result, custom_result;
+
+    if (argc != 6 && argc != 7) {
+        usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (parse_u64(argv[1], &threads_u64) != 0 || threads_u64 == 0 ||
+        threads_u64 > 4096 ||
+        parse_u64(argv[2], &total_ops) != 0 || total_ops == 0 ||
+        parse_u64(argv[3], &initial_keys) != 0 ||
+        initial_keys > UINT64_MAX / 2 ||
+        parse_double_arg(argv[4], &search_fraction) != 0 ||
+        parse_double_arg(argv[5], &insert_fraction) != 0 ||
+        (argc == 7 && (parse_u64(argv[6], &repetitions) != 0 || repetitions == 0)) ||
+        search_fraction < 0.0 || search_fraction > 1.0 ||
+        insert_fraction < 0.0 || insert_fraction > 1.0 ||
+        search_fraction + insert_fraction > 1.0 + 1e-12) {
+        usage(argv[0]);
+        fprintf(stderr, "Некорректные параметры. Проверьте числа и доли операций.\n");
+        return EXIT_FAILURE;
+    }
+    thread_count = (int)threads_u64;
+    delete_fraction = 1.0 - search_fraction - insert_fraction;
+
+    printf("Потоков: %d; операций: %" PRIu64 "; начальных ключей: %" PRIu64 "\n",
+           thread_count, total_ops, initial_keys);
+    printf("Распределение: поиск=%.2f%%, вставка=%.2f%%, удаление=%.2f%%; повторов=%" PRIu64 "\n\n",
+           search_fraction * 100.0, insert_fraction * 100.0,
+           delete_fraction * 100.0, repetitions);
+
+    for (rep = 0; rep < repetitions; rep++) {
+        /* Alternate the order to reduce bias from always running one version first. */
+        if ((rep % 2) == 0) {
+            if (run_benchmark(LOCK_PTHREAD, thread_count, total_ops, initial_keys,
+                              search_fraction, insert_fraction, &system_result) != 0 ||
+                run_benchmark(LOCK_CUSTOM, thread_count, total_ops, initial_keys,
+                              search_fraction, insert_fraction, &custom_result) != 0) {
+                return EXIT_FAILURE;
+            }
+        } else {
+            if (run_benchmark(LOCK_CUSTOM, thread_count, total_ops, initial_keys,
+                              search_fraction, insert_fraction, &custom_result) != 0 ||
+                run_benchmark(LOCK_PTHREAD, thread_count, total_ops, initial_keys,
+                              search_fraction, insert_fraction, &system_result) != 0) {
+                return EXIT_FAILURE;
+            }
+        }
+        system_total += system_result.elapsed_seconds;
+        custom_total += custom_result.elapsed_seconds;
+
+        printf("=== Повтор %" PRIu64 " из %" PRIu64 " ===\n", rep + 1, repetitions);
+        print_result("Библиотечный pthread_rwlock_t", &system_result, total_ops);
+        print_result("Собственный my_rwlock_t", &custom_result, total_ops);
+        if (system_result.errors != 0 || custom_result.errors != 0 ||
+            !system_result.list_valid || !custom_result.list_valid ||
+            system_result.member_ops + system_result.insert_ops + system_result.delete_ops != total_ops ||
+            custom_result.member_ops + custom_result.insert_ops + custom_result.delete_ops != total_ops) {
+            fprintf(stderr, "Проверка результата не пройдена.\n");
+            return EXIT_FAILURE;
+        }
+        putchar('\n');
+    }
+
+    {
+        double system_avg = system_total / (double)repetitions;
+        double custom_avg = custom_total / (double)repetitions;
+        double delta_pct = system_avg > 0.0
+            ? (custom_avg - system_avg) / system_avg * 100.0 : 0.0;
+        printf("=== Среднее по %" PRIu64 " повторам ===\n", repetitions);
+        printf("pthread_rwlock_t: %.6f с, %.0f операций/с\n",
+               system_avg, (double)total_ops / system_avg);
+        printf("my_rwlock_t:      %.6f с, %.0f операций/с\n",
+               custom_avg, (double)total_ops / custom_avg);
+        printf("Собственная реализация %s на %.2f%% по времени.\n",
+               delta_pct > 0.0 ? "медленнее" : (delta_pct < 0.0 ? "быстрее" : "равна"),
+               delta_pct >= 0.0 ? delta_pct : -delta_pct);
+    }
+    return EXIT_SUCCESS;
+}
