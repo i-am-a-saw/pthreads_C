@@ -571,7 +571,6 @@ int main(int argc, char **argv)
            delete_fraction * 100.0, repetitions);
 
     for (rep = 0; rep < repetitions; rep++) {
-        /* Alternate the order to reduce bias from always running one version first. */
         if ((rep % 2) == 0) {
             if (run_benchmark(LOCK_PTHREAD, thread_count, total_ops, initial_keys,
                               search_fraction, insert_fraction, &system_result) != 0 ||
